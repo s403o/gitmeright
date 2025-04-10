@@ -1,0 +1,6 @@
+[user]
+    name = Your Name
+    email = you@project2.com
+
+[core]
+    sshCommand = "ssh -i ~/.ssh/id_rsa_project2"
