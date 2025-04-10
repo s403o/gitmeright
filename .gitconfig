@@ -1,0 +1,25 @@
+[includeIf "hasconfig:remote.*.url:git@github.com:myuser/**"]
+    path = ".gitconfig-personal"
+
+[includeIf "hasconfig:remote.*.url:git@bitbucket.org:project1/**"]
+    path = ".gitconfig-project1"
+
+[includeIf "hasconfig:remote.*.url:git@gitlab.com:project2/**"]
+    path = ".gitconfig-project2"
+
+[pull]
+    rebase = true
+[fetch]
+    prune = true
+[diff]
+    colorMoved = zebra
+[init]
+    defaultBranch = main
+[rebase]
+    autoStash = true
+
+[alias]
+    co = checkout
+    br = branch
+    st = status
+    lg = log --oneline --graph --all
