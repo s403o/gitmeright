@@ -36,17 +36,17 @@ cp .gitconfig-project2 ~/.gitconfig-$PROJECT2
 # Step 4: Fill in user.name, user.email, sshCommand
 
 # Personal
-sed -i "s/Your Personal Name/$NAME_PERSONAL/" ~/.gitconfig-personal
+sed -i "s/PERSONAL_NAME_PLACEHOLDER/$NAME_PERSONAL/" ~/.gitconfig-personal
 sed -i "s/you@personal.com/$EMAIL_PERSONAL/" ~/.gitconfig-personal
 sed -i "s/id_rsa_personal/id_rsa_personal/" ~/.gitconfig-personal
 
 # Project 1
-sed -i "s/Your Project1 Name/$NAME_PROJECT1/" ~/.gitconfig-$PROJECT1
+sed -i "s/PROJECT1_NAME_PLACEHOLDER/$NAME_PROJECT1/" ~/.gitconfig-$PROJECT1
 sed -i "s/you@project1.com/$EMAIL_PROJECT1/" ~/.gitconfig-$PROJECT1
 sed -i "s/id_rsa_project1/id_rsa_$PROJECT1/" ~/.gitconfig-$PROJECT1
 
 # Project 2
-sed -i "s/Your Project2 Name/$NAME_PROJECT2/" ~/.gitconfig-$PROJECT2
+sed -i "s/PROJECT2_NAME_PLACEHOLDER/$NAME_PROJECT2/" ~/.gitconfig-$PROJECT2
 sed -i "s/you@project2.com/$EMAIL_PROJECT2/" ~/.gitconfig-$PROJECT2
 sed -i "s/id_rsa_project2/id_rsa_$PROJECT2/" ~/.gitconfig-$PROJECT2
 
