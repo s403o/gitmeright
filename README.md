@@ -9,7 +9,7 @@ No more wrong emails, mismatched SSH keys, or accidental commits with your work 
 
 ## ✨ What It Does
 
-✔️ Automatically switches your Git config based on the remote URL
+✔️ Automatically switches your Git config based on the remote URL  
 ✔️ Keeps work, freelance, and personal identities separate  
 ✔️ Prevents “oops wrong email” moments  
 ✔️ Adds aliases and fetch/prune tweaks for a smoother experience  
@@ -60,7 +60,6 @@ Here’s how it’s organized:
 ## 🔧 Example of a Per-Project Config: `.gitconfig-project1`
 
 ```ini
-
 [user]
     name = Your Project1 Name
     email = you@project1.com
@@ -70,7 +69,14 @@ Here’s how it’s organized:
 ```
 
 ## 🛠 How to Set It Up
-### use one-line setup script:
+
+### Step 1: Clone the Repository
+
+```bash
+git clone https://github.com/s403o/gitmeright.git && cd gitmeright
+```
+
+### Step 2: Use the One-Line Setup Script
 
 ```bash
 ./setup.sh
