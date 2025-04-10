@@ -1,4 +1,4 @@
-[includeIf "hasconfig:remote.*.url:git@github.com:myuser/**"]
+[includeIf "hasconfig:remote.*.url:git@github.com:GITHUB_USERNAME_PLACEHOLDER/**"]
     path = ".gitconfig-personal"
 
 [includeIf "hasconfig:remote.*.url:git@bitbucket.org:project1/**"]
