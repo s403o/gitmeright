@@ -1,5 +1,13 @@
 # 🧠 gitmeright
 
+[![GitHub Repo stars](https://img.shields.io/github/stars/s403o/gitmeright?style=social)](https://github.com/s403o/gitmeright/stargazers)
+[![GitHub last commit](https://img.shields.io/github/last-commit/s403o/gitmeright)](https://github.com/s403o/gitmeright/commits/main)
+[![GitHub issues](https://img.shields.io/github/issues/s403o/gitmeright)](https://github.com/s403o/gitmeright/issues)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+![GitHub repo size](https://img.shields.io/github/repo-size/s403o/gitmeright)
+![GitHub forks](https://img.shields.io/github/forks/s403o/gitmeright?style=social)
+![GitHub pull requests](https://img.shields.io/github/issues-pr/s403o/gitmeright)
+
 **Automatically use the right Git identity per project.**  
 No more wrong emails, mismatched SSH keys, or accidental commits with your work account on side projects 😅
 
