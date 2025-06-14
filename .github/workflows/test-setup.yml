@@ -10,7 +10,7 @@ jobs:
   test-setup:
     strategy:
       matrix:
-        os: [ubuntu-latest, ubuntu-20.04]
+        os: [ubuntu-latest, ubuntu-22.04]
     runs-on: ${{ matrix.os }}
     
     steps:
