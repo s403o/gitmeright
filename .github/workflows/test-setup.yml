@@ -1,0 +1,141 @@
+name: Test Setup Script
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test-setup:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, ubuntu-20.04]
+    runs-on: ${{ matrix.os }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Make setup script executable
+      run: chmod +x setup.sh
+      
+    - name: Test error messages exist
+      run: |
+        echo "Testing error message functionality..."
+        grep -q "❌ Error.*cannot be empty" setup.sh || (echo "❌ Empty input error message not found" && exit 1)
+        grep -q "❌ Error.*Invalid email format" setup.sh || (echo "❌ Email validation error message not found" && exit 1)
+        echo "✅ Error messages found in script"
+        
+    - name: Test email validation regex
+      run: |
+        echo "Testing email validation function..."
+        
+        cat << 'EOF' > test_email_validation.sh
+        #!/bin/bash
+        
+        validate_email() {
+          local email="$1"
+          if [[ "$email" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+            return 0
+          else
+            return 1
+          fi
+        }
+        
+        # Test valid emails
+        validate_email "test@example.com" || (echo "❌ Valid email rejected: test@example.com" && exit 1)
+        validate_email "user.name+tag@domain.co.uk" || (echo "❌ Complex valid email rejected" && exit 1)
+        validate_email "123@domain.com" || (echo "❌ Numeric email rejected" && exit 1)
+        
+        # Test invalid emails
+        validate_email "invalid-email" && (echo "❌ Invalid email accepted: invalid-email" && exit 1)
+        validate_email "@domain.com" && (echo "❌ Invalid email accepted: @domain.com" && exit 1)
+        validate_email "user@" && (echo "❌ Invalid email accepted: user@" && exit 1)
+        validate_email "user.domain.com" && (echo "❌ Invalid email accepted: user.domain.com" && exit 1)
+        
+        echo "✅ Email validation tests passed"
+        EOF
+        
+        chmod +x test_email_validation.sh
+        ./test_email_validation.sh
+      
+    - name: Run automated setup test
+      run: |
+        echo "Running full setup test..."
+        
+        # Create test input file
+        cat << EOF > test_input.txt
+        testuser
+        Test User Personal
+        test@personal.com
+        work
+        Test User Work
+        test@work.com
+        freelance
+        Test User Freelance
+        test@freelance.com
+        EOF
+        
+        # Run setup with test input
+        ./setup.sh < test_input.txt
+        
+    - name: Verify Git configs were created
+      run: |
+        echo "Checking if Git config files were created..."
+        test -f ~/.gitconfig || (echo "❌ Main .gitconfig not found" && exit 1)
+        test -f ~/.gitconfig-personal || (echo "❌ Personal config not found" && exit 1)
+        test -f ~/.gitconfig-work || (echo "❌ Work config not found" && exit 1)
+        test -f ~/.gitconfig-freelance || (echo "❌ Freelance config not found" && exit 1)
+        echo "✅ All config files created successfully"
+        
+    - name: Verify Git config content
+      run: |
+        echo "Verifying Git config content..."
+        
+        # Check main config
+        grep -q "testuser" ~/.gitconfig || (echo "❌ GitHub username not found in main config" && exit 1)
+        grep -q "work" ~/.gitconfig || (echo "❌ Work project not found in main config" && exit 1)
+        grep -q "freelance" ~/.gitconfig || (echo "❌ Freelance project not found in main config" && exit 1)
+        
+        # Check personal config
+        grep -q "Test User Personal" ~/.gitconfig-personal || (echo "❌ Personal name not found" && exit 1)
+        grep -q "test@personal.com" ~/.gitconfig-personal || (echo "❌ Personal email not found" && exit 1)
+        
+        # Check work config  
+        grep -q "Test User Work" ~/.gitconfig-work || (echo "❌ Work name not found" && exit 1)
+        grep -q "test@work.com" ~/.gitconfig-work || (echo "❌ Work email not found" && exit 1)
+        
+        # Check freelance config
+        grep -q "Test User Freelance" ~/.gitconfig-freelance || (echo "❌ Freelance name not found" && exit 1)
+        grep -q "test@freelance.com" ~/.gitconfig-freelance || (echo "❌ Freelance email not found" && exit 1)
+        
+        echo "✅ All config content verified successfully"
+        
+    - name: Verify SSH keys were generated
+      run: |
+        echo "Checking if SSH keys were generated..."
+        test -f ~/.ssh/id_rsa_personal || (echo "❌ Personal SSH key not found" && exit 1)
+        test -f ~/.ssh/id_rsa_personal.pub || (echo "❌ Personal SSH public key not found" && exit 1)
+        test -f ~/.ssh/id_rsa_work || (echo "❌ Work SSH key not found" && exit 1)
+        test -f ~/.ssh/id_rsa_work.pub || (echo "❌ Work SSH public key not found" && exit 1)
+        test -f ~/.ssh/id_rsa_freelance || (echo "❌ Freelance SSH key not found" && exit 1)
+        test -f ~/.ssh/id_rsa_freelance.pub || (echo "❌ Freelance SSH public key not found" && exit 1)
+        echo "✅ All SSH keys generated successfully"
+        
+    - name: Test script syntax
+      run: |
+        echo "Testing script syntax..."
+        bash -n setup.sh || (echo "❌ Script has syntax errors" && exit 1)
+        echo "✅ Script syntax is valid"
+
+    - name: Display final configs (for debugging)
+      run: |
+        echo "=== Main .gitconfig ==="
+        cat ~/.gitconfig
+        echo "=== Personal config ==="
+        cat ~/.gitconfig-personal
+        echo "=== Work config ==="
+        cat ~/.gitconfig-work
+        echo "=== SSH keys ==="
+        ls -la ~/.ssh/id_rsa_*
