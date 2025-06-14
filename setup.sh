@@ -2,19 +2,27 @@
 # gitmeright setup script
 # author: @s403o
 
-# Step 1: User Input + Validation
+# Prompt and validate non-empty input (and validate emails if applicable)
 prompt_and_validate() {
   local prompt="$1"
   local varname="$2"
 
   while true; do
     read -p "$prompt" input
+
     if [ -z "$input" ]; then
       echo "❌ Error: $varname cannot be empty. Please enter a valid value."
-    else
-      eval "$varname=\"$input\""
-      break
+      continue
     fi
+
+    # Email format validation
+    if [[ "$varname" == *EMAIL* && ! "$input" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+      echo "❌ Error: Invalid email format. Please try again."
+      continue
+    fi
+
+    eval "$varname=\"$input\""
+    break
   done
 }
 
