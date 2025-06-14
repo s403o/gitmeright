@@ -2,20 +2,37 @@
 # gitmeright setup script
 # author: @s403o
 
+# Step 1: User Input + Validation
+prompt_and_validate() {
+  local prompt="$1"
+  local varname="$2"
+
+  while true; do
+    read -p "$prompt" input
+    if [ -z "$input" ]; then
+      echo "❌ Error: $varname cannot be empty. Please enter a valid value."
+    else
+      eval "$varname=\"$input\""
+      break
+    fi
+  done
+}
+
+
 echo "🎉 Welcome to gitmeright setup!"
 
 # Step 1: User Input
-read -p "🔧 Enter your GitHub username: " GITHUB_USER
-read -p "👤 Enter your full name for Personal (GitHub): " NAME_PERSONAL
-read -p "📧 Enter email for Personal: " EMAIL_PERSONAL
+prompt_and_validate "🔧 Enter your GitHub username: " GITHUB_USER
+prompt_and_validate "👤 Enter your full name for Personal (GitHub): " NAME_PERSONAL
+prompt_and_validate "📧 Enter email for Personal: " EMAIL_PERSONAL
 
-read -p "🔧 Enter name for Project 1 (e.g., work): " PROJECT1
-read -p "👤 Enter your full name for $PROJECT1: " NAME_PROJECT1
-read -p "📧 Enter email for $PROJECT1: " EMAIL_PROJECT1
+prompt_and_validate "🔧 Enter name for Project 1 (e.g., work): " PROJECT1
+prompt_and_validate "👤 Enter your full name for $PROJECT1: " NAME_PROJECT1
+prompt_and_validate "📧 Enter email for $PROJECT1: " EMAIL_PROJECT1
 
-read -p "🔧 Enter name for Project 2 (e.g., freelance): " PROJECT2
-read -p "👤 Enter your full name for $PROJECT2: " NAME_PROJECT2
-read -p "📧 Enter email for $PROJECT2: " EMAIL_PROJECT2
+prompt_and_validate "🔧 Enter name for Project 2 (e.g., freelance): " PROJECT2
+prompt_and_validate "👤 Enter your full name for $PROJECT2: " NAME_PROJECT2
+prompt_and_validate "📧 Enter email for $PROJECT2: " EMAIL_PROJECT2
 
 # Step 2: Copy main .gitconfig
 echo "📁 Copying .gitconfig to ~/.gitconfig..."
