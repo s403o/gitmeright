@@ -4,6 +4,7 @@
 [![GitHub last commit](https://img.shields.io/github/last-commit/s403o/gitmeright)](https://github.com/s403o/gitmeright/commits/main)
 [![GitHub issues](https://img.shields.io/github/issues/s403o/gitmeright)](https://github.com/s403o/gitmeright/issues)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Test Setup Script](https://github.com/s403o/gitmeright/actions/workflows/test-setup.yml/badge.svg)](https://github.com/s403o/gitmeright/actions/workflows/test-setup.yml)
 ![GitHub repo size](https://img.shields.io/github/repo-size/s403o/gitmeright)
 ![GitHub forks](https://img.shields.io/github/forks/s403o/gitmeright?style=social)
 ![GitHub pull requests](https://img.shields.io/github/issues-pr/s403o/gitmeright)
