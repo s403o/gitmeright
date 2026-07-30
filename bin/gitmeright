@@ -441,7 +441,7 @@ generate_ssh_key() {
 	fi
 	chmod 600 "$key"
 	chmod 644 "$key.pub"
-	ok "created $key (no passphrase)"
+	ok "created $key (no passphrase — see 'gitmeright doctor')"
 }
 
 show_pubkey() {
@@ -463,6 +463,43 @@ provider_key_url() {
 	esac
 }
 
+# --- rule matching (for whoami / doctor) -------------------------------------
+
+# Mirrors the patterns emit_fragment writes. Returns 0 and prints nothing when
+# the profile matches; returns 1 and prints the reason when it does not.
+profile_match_reason() {
+	local label=$1 remote=$2 repodir=$3
+	local host org gitdir
+	host=$(state_get "$label" host)
+	org=$(state_get "$label" org)
+	gitdir=$(state_get "$label" gitdir)
+
+	if [ -n "$gitdir" ]; then
+		local expanded resolved
+		expanded=$(normalize_dir "$gitdir")
+		resolved=$(cd "$repodir" 2>/dev/null && pwd -P) || resolved=$repodir
+		case "$resolved/" in "$expanded"*) return 0 ;; esac
+	fi
+
+	if [ -n "$remote" ] && [ -n "$host" ] && [ -n "$org" ]; then
+		case "$remote" in
+			"git@$host:$org/"*|"ssh://git@$host/$org/"*|"https://$host/$org/"*) return 0 ;;
+		esac
+		case "$remote" in
+			*"$host"*)
+				printf 'host matches, org does not (expects %s/)' "$org"; return 1 ;;
+		esac
+		printf 'different host (expects %s)' "$host"
+		return 1
+	fi
+
+	if [ -z "$remote" ]; then
+		printf 'no remote, and no gitdir rule for this path'
+	else
+		printf 'no host/org configured'
+	fi
+	return 1
+}
 
 # --- commands ----------------------------------------------------------------
 
@@ -642,9 +679,9 @@ apply_profiles() {
 
 	printf '\n'
 	if [ "$failed" -eq 0 ]; then
-		ok "done. run ${C_BOLD}gitmeright list${C_RESET} to see your identities."
+		ok "done. try ${C_BOLD}gitmeright whoami${C_RESET} inside a repo, or ${C_BOLD}gitmeright doctor${C_RESET} for a health check."
 	else
-		warn "finished with problems above."
+		warn "finished with problems above — run ${C_BOLD}gitmeright doctor${C_RESET}."
 		return 1
 	fi
 }
@@ -747,6 +784,212 @@ cmd_list() {
 			"$([ -n "$host" ] && printf '%s/%s' "$host" "$org" || printf '-')" \
 			"${gitdir:--}" "$keystate"
 	done
+}
+
+cmd_whoami() {
+	require_git
+	git rev-parse --git-dir >/dev/null 2>&1 || die "not inside a git repository."
+
+	local repodir remote name email origin label matched=''
+	repodir=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+	remote=$(git remote get-url origin 2>/dev/null || printf '')
+	name=$(git config user.name 2>/dev/null || printf '')
+	email=$(git config user.email 2>/dev/null || printf '')
+	origin=$(git config --show-origin user.email 2>/dev/null | cut -f1 | sed 's/^file://' || printf '')
+
+	for label in $(state_labels); do
+		if [ "$origin" = "$(profile_path "$label")" ]; then matched=$label; break; fi
+	done
+
+	printf '%-9s %s\n' repo "$repodir"
+	printf '%-9s %s\n' remote "${remote:-(none)}"
+
+	if [ -n "$matched" ]; then
+		printf '%-9s %s%s%s\n' profile "$C_GREEN" "$matched" "$C_RESET"
+		printf '%-9s %s\n' name "$name"
+		printf '%-9s %s\n' email "$email"
+		local key; key=$(state_get "$matched" key)
+		[ -n "$key" ] && printf '%-9s %s (IdentitiesOnly: yes)\n' key "$key"
+		return 0
+	fi
+
+	if [ -n "$email" ]; then
+		printf '%-9s %s(none — falling through)%s\n' profile "$C_YELLOW" "$C_RESET"
+		printf '%-9s %s\n' name "$name"
+		printf '%-9s %s\n' email "$email"
+		printf '%-9s %s\n' from "${origin:-unknown}"
+		printf '\n%sthis identity did not come from a gitmeright profile.%s\n' "$C_YELLOW" "$C_RESET"
+	else
+		printf '%-9s %s✗ none matched%s\n' profile "$C_RED" "$C_RESET"
+		printf '\ngit will refuse to commit here — that is deliberate.\n'
+	fi
+
+	if [ "$(state_count)" -gt 0 ]; then
+		printf '\nrules checked:\n'
+		local reason
+		for label in $(state_labels); do
+			if reason=$(profile_match_reason "$label" "$remote" "$repodir"); then
+				printf '  %s✓%s %-12s would match\n' "$C_GREEN" "$C_RESET" "$label"
+			else
+				printf '  %s✗%s %-12s %s\n' "$C_RED" "$C_RESET" "$label" "$reason"
+			fi
+		done
+		printf '\nfix: %sgitmeright add <label>%s, or point this repo at a matching remote.\n' "$C_BOLD" "$C_RESET"
+	fi
+	return 1
+}
+
+check() {
+	local status=$1 label=$2 detail=${3:-}
+	case "$status" in
+		ok)   printf '  %s✓%s %-34s %s\n' "$C_GREEN" "$C_RESET" "$label" "$detail" ;;
+		warn) printf '  %s!%s %-34s %s\n' "$C_YELLOW" "$C_RESET" "$label" "$detail" ;;
+		bad)  printf '  %s✗%s %-34s %s\n' "$C_RED" "$C_RESET" "$label" "$detail" ;;
+	esac
+}
+
+cmd_doctor() {
+	require_git
+	local rc=0 online=0
+	[ "${1:-}" = "--online" ] && online=1
+
+	printf '%sgitmeright doctor%s\n\n' "$C_BOLD" "$C_RESET"
+
+	# git version
+	local gv; gv=$(git --version | awk '{print $3}')
+	if supports_hasconfig; then
+		check ok "git version" "$gv (remote-URL matching available)"
+	else
+		check warn "git version" "$gv — needs 2.36 for remote matching; use directory rules"
+		rc=1
+	fi
+
+	# installed at all
+	if ! state_exists; then
+		check bad "installation" "no profiles — run 'gitmeright init'"
+		return 1
+	fi
+	check ok "state file" "$STATE ($(state_count) profile(s))"
+
+	# include line
+	if [ -f "$GITCONFIG" ]; then
+		local n; n=$(grep -cF "$INCLUDE_MARKER" "$GITCONFIG" 2>/dev/null || printf 0)
+		if [ "$n" -eq 1 ]; then
+			check ok "include in ~/.gitconfig" "present, once"
+		elif [ "$n" -eq 0 ]; then
+			check bad "include in ~/.gitconfig" "missing — run 'gitmeright regenerate'"
+			rc=1
+		else
+			check bad "include in ~/.gitconfig" "$n copies — remove the duplicates"
+			rc=1
+		fi
+	else
+		check bad "file ~/.gitconfig" "missing"
+		rc=1
+	fi
+
+	# a global [user] would shadow every profile
+	local guser; guser=$(git config --global --get user.email 2>/dev/null || printf '')
+	if [ -n "$guser" ]; then
+		local gorigin; gorigin=$(git config --global --show-origin --get user.email 2>/dev/null | cut -f1 | sed 's/^file://')
+		if [ "$gorigin" = "$GITCONFIG" ]; then
+			check warn "global user.email" "$guser in ~/.gitconfig — repos matching no profile will use it silently"
+		fi
+	else
+		check ok "global user.email" "unset — an unmatched repo fails loudly (intended)"
+	fi
+
+	# fragment matches state
+	if [ -f "$FRAGMENT" ]; then
+		check ok "routing fragment" "$FRAGMENT"
+	else
+		check bad "routing fragment" "missing — run 'gitmeright regenerate'"
+		rc=1
+	fi
+
+	# ~/.ssh permissions. `find -perm` is the portable mode test; `stat` flags
+	# differ between GNU and BSD and `ls` output is not machine-readable.
+	if [ -d "$HOME/.ssh" ]; then
+		if has_mode "$HOME/.ssh" 700; then
+			check ok "permissions on ~/.ssh" "700"
+		else
+			check bad "permissions on ~/.ssh" "should be 700 — run: chmod 700 ~/.ssh"
+			rc=1
+		fi
+	fi
+
+	printf '\n%sprofiles%s\n' "$C_BOLD" "$C_RESET"
+	local label tmp; tmp=$(mktemp -d)
+	for label in $(state_labels); do
+		local host org email key expect got
+		host=$(state_get "$label" host); org=$(state_get "$label" org)
+		email=$(state_get "$label" email); key=$(state_get "$label" key)
+
+		# resolves?
+		if [ -n "$host" ] && [ -n "$org" ] && supports_hasconfig; then
+			rm -rf "$tmp/r"; mkdir -p "$tmp/r"
+			git -C "$tmp/r" init -q
+			git -C "$tmp/r" remote add origin "git@$host:$org/probe.git"
+			got=$(git -C "$tmp/r" config user.email 2>/dev/null || printf '')
+			if [ "$got" = "$email" ]; then
+				check ok "$label resolves" "git@$host:$org/** → $email"
+			else
+				check bad "$label resolves" "got '${got:-nothing}', expected $email"
+				rc=1
+			fi
+		elif [ -n "$(state_get "$label" gitdir)" ]; then
+			check ok "$label resolves" "gitdir:$(state_get "$label" gitdir)"
+		else
+			check bad "$label resolves" "no rule — this profile can never apply"
+			rc=1
+		fi
+
+		# key health. Check permissions before readability: ssh-keygen refuses to
+		# read a world-readable private key, so a mode problem would otherwise be
+		# reported as "incomplete pair" and send the user chasing the wrong fault.
+		if [ -n "$key" ]; then
+			if [ ! -f "$key" ]; then
+				check bad "$label key" "$key does not exist"
+				rc=1
+			elif ! has_mode "$key" 600; then
+				check bad "$label key" "$(basename "$key") must be mode 600 — run: chmod 600 $key"
+				rc=1
+			elif key_is_healthy "$key"; then
+				check ok "$label key" "$(basename "$key")"
+			else
+				check bad "$label key" "$key is incomplete or unreadable (missing .pub?)"
+				rc=1
+			fi
+			if grep -q 'IdentitiesOnly=yes' "$(profile_path "$label")" 2>/dev/null; then
+				check ok "$label IdentitiesOnly" "yes"
+			else
+				check bad "$label IdentitiesOnly" "absent — ssh may authenticate as another account"
+				rc=1
+			fi
+		fi
+
+		# live auth
+		if [ "$online" -eq 1 ] && [ -n "$key" ] && [ -n "$host" ]; then
+			local out who
+			out=$(ssh -o StrictHostKeyChecking=accept-new -o IdentitiesOnly=yes -i "$key" -T "git@$host" 2>&1 || true)
+			who=$(printf '%s' "$out" | sed -n 's/.*Hi \([^!]*\)!.*/\1/p; s/.*Welcome to GitLab, @\([^!]*\)!.*/\1/p' | head -1)
+			if [ -n "$who" ]; then
+				check ok "$label ssh auth" "$host answered as '$who'"
+			else
+				check warn "$label ssh auth" "$(printf '%s' "$out" | head -1)"
+			fi
+		fi
+	done
+	rm -rf "$tmp"
+
+	printf '\n'
+	if [ "$rc" -eq 0 ]; then
+		ok "all checks passed"
+	else
+		fail "some checks failed — see above"
+	fi
+	[ "$online" -eq 0 ] && info "${C_DIM}run 'gitmeright doctor --online' to test ssh against each host${C_RESET}"
+	return $rc
 }
 
 cmd_regenerate() {
@@ -859,6 +1102,8 @@ ${C_BOLD}commands${C_RESET}
   add [label]          add one more identity
   remove <label>       delete an identity
   list                 show every identity
+  whoami               which identity does THIS repo use, and why
+  doctor [--online]    health check; --online tests ssh against each host
   tweaks [--install|--remove]
                        optional opinionated git defaults
   regenerate           rebuild generated config from your saved profiles
@@ -908,6 +1153,8 @@ main() {
 		add)         shift; cmd_add "$@" ;;
 		remove|rm)   shift; cmd_remove "${1:-}" ;;
 		list|ls)     shift; cmd_list ;;
+		whoami|who)  shift; cmd_whoami ;;
+		doctor)      shift; cmd_doctor "${1:-}" ;;
 		tweaks)      shift; cmd_tweaks "${1:-}" ;;
 		regenerate)  shift; cmd_regenerate ;;
 		uninstall)   shift; cmd_uninstall ;;

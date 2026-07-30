@@ -139,7 +139,48 @@ seed_existing_config() {
 
 # --- C-01: the old script could not fail -------------------------------------
 
+@test "C-01: a profile that can never match is reported and exits non-zero" {
+	# No host/org and no gitdir: the rule cannot be written, so it must not
+	# claim success the way the old script's hardcoded ✅ did.
+	mkdir -p "$GMR_DIR"
+	git config -f "$STATE" profile.broken.name  "B"
+	git config -f "$STATE" profile.broken.email "b@example.com"
+	run "$GITMERIGHT" doctor
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"can never apply"* ]]
+}
+
+@test "C-01: doctor flags a global user.email that shadows every profile" {
+	gmr add work --name W --email w@acme.com --host github.com --org acme --no-key
+	git config --global user.email shadow@example.com
+	run "$GITMERIGHT" doctor
+	[[ "$output" == *"matching no profile will use it silently"* ]]
+}
+
+@test "C-01: doctor flags a missing include" {
+	gmr add work --name W --email w@acme.com --host github.com --org acme --no-key
+	grep -v 'gitmeright' "$HOME/.gitconfig" > "$HOME/.tmp" && mv "$HOME/.tmp" "$HOME/.gitconfig"
+	run "$GITMERIGHT" doctor
+	[ "$status" -ne 0 ]
+}
+
+@test "C-01: doctor flags a key whose permissions are wrong" {
+	gmr add work --name W --email w@acme.com --host github.com --org acme
+	chmod 644 "$HOME/.ssh/id_ed25519_work"
+	run "$GITMERIGHT" doctor
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"600"* ]]
+}
+
 # --- M-01: a half-generated key pair was reported as success -----------------
+
+@test "M-01: an incomplete key pair is reported, not silently skipped" {
+	gmr add work --name W --email w@acme.com --host github.com --org acme
+	rm -f "$HOME/.ssh/id_ed25519_work.pub"
+	run "$GITMERIGHT" doctor
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"incomplete or unreadable"* ]]
+}
 
 @test "M-05: ~/.ssh is created as 700 and keys as 600" {
 	gmr add work --name W --email w@acme.com --host github.com --org acme

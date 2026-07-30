@@ -9,7 +9,77 @@ teardown() { teardown_sandbox; }
 
 # --- whoami ------------------------------------------------------------------
 
+@test "whoami names the matching profile and exits 0" {
+	gmr add work --name "Work W" --email w@acme.com --host github.com --org acme --no-key
+	repo=$(make_repo r git@github.com:acme/api.git)
+
+	run bash -c "cd '$repo' && '$GITMERIGHT' whoami"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"work"* ]]
+	[[ "$output" == *"w@acme.com"* ]]
+}
+
+@test "whoami explains WHY nothing matched and exits non-zero" {
+	gmr add work --name "Work W" --email w@acme.com --host github.com --org acme --no-key
+	repo=$(make_repo r git@github.com:someoneelse/api.git)
+
+	run bash -c "cd '$repo' && '$GITMERIGHT' whoami"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"none matched"* ]]
+	[[ "$output" == *"org does not"* ]]      # the specific reason, not just "no match"
+	[[ "$output" == *"deliberate"* ]]        # explains the loud failure is intended
+}
+
+@test "whoami distinguishes a wrong host from a wrong org" {
+	gmr add work --name W --email w@acme.com --host github.com --org acme --no-key
+	repo=$(make_repo r git@gitlab.com:acme/api.git)
+
+	run bash -c "cd '$repo' && '$GITMERIGHT' whoami"
+	[[ "$output" == *"different host"* ]]
+}
+
+@test "whoami fails cleanly outside a git repository" {
+	run bash -c "cd '$SANDBOX' && '$GITMERIGHT' whoami"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"not inside a git repository"* ]]
+}
+
+@test "whoami never writes anything" {
+	gmr add work --name W --email w@acme.com --host github.com --org acme --no-key
+	repo=$(make_repo r git@github.com:acme/api.git)
+	touch "$SANDBOX/.stamp"; sleep 1
+	bash -c "cd '$repo' && '$GITMERIGHT' whoami" >/dev/null
+	[ -z "$(find "$GMR_DIR" -newer "$SANDBOX/.stamp" 2>/dev/null)" ]
+}
+
 # --- doctor ------------------------------------------------------------------
+
+@test "doctor passes on a healthy install" {
+	gmr add work --name W --email w@acme.com --host github.com --org acme --no-key
+	run "$GITMERIGHT" doctor
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"all checks passed"* ]]
+}
+
+@test "doctor is useful when gitmeright was never installed" {
+	run "$GITMERIGHT" doctor
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"gitmeright init"* ]]
+}
+
+@test "doctor reports the git version" {
+	gmr add work --name W --email w@acme.com --host github.com --org acme --no-key
+	run "$GITMERIGHT" doctor
+	[[ "$output" == *"git version"* ]]
+}
+
+@test "doctor never writes anything" {
+	gmr add work --name W --email w@acme.com --host github.com --org acme --no-key
+	cp "$HOME/.gitconfig" "$SANDBOX/before"
+	"$GITMERIGHT" doctor >/dev/null || true
+	run cmp "$SANDBOX/before" "$HOME/.gitconfig"
+	[ "$status" -eq 0 ]
+}
 
 # --- list / remove -----------------------------------------------------------
 
@@ -45,6 +115,17 @@ teardown() { teardown_sandbox; }
 # --- guard hook --------------------------------------------------------------
 
 # --- flags -------------------------------------------------------------------
+
+@test "--help and --version work and exit 0" {
+	run "$GITMERIGHT" --help
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"whoami"* ]]
+	[[ "$output" == *"doctor"* ]]
+
+	run "$GITMERIGHT" --version
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"gitmeright"* ]]
+}
 
 @test "an unknown command or flag fails with usage" {
 	run "$GITMERIGHT" frobnicate
