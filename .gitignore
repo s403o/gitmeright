@@ -1,13 +1,15 @@
 # macOS
 .DS_Store
 
-# editor backups and sed leftovers
+# editor backups
 *.bak
 *~
 
 # local test scratch
 test/tmp/
 
-.claude/*
+# Claude Code local settings
+.claude/
+
 # private audit notes — local only, never published
 audit/
