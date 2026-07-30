@@ -41,12 +41,10 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Install bats
-        run: |
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            brew install bats-core
-          else
-            sudo apt-get update -qq && sudo apt-get install -y -qq bats
-          fi
+        # Installed from npm rather than apt/brew so every runner gets the same
+        # version. Ubuntu 22.04's apt bats is 1.2.x, which predates flags this
+        # workflow uses — a difference that only shows up on one matrix leg.
+        run: npm install -g bats
 
       - name: Record versions
         run: |
