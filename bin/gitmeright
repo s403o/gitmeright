@@ -1089,6 +1089,55 @@ cmd_tweaks() {
 	esac
 }
 
+HOOK_MARKER="# installed by gitmeright"
+
+cmd_guard() {
+	require_git
+	git rev-parse --git-dir >/dev/null 2>&1 || die "not inside a git repository."
+	local hooks hook
+	hooks=$(git rev-parse --git-path hooks)
+	hook="$hooks/pre-commit"
+
+	case "${1:---install}" in
+		--install)
+			if [ -f "$hook" ] && ! grep -qF "$HOOK_MARKER" "$hook" 2>/dev/null; then
+				fail "a pre-commit hook already exists at $hook and was not written by gitmeright."
+				info "not overwriting it. add this to it by hand:"
+				printf '\n  command -v gitmeright >/dev/null && gitmeright whoami >/dev/null || {\n'
+				printf '    echo "gitmeright: this repo matches no profile" >&2; exit 1; }\n\n'
+				return 1
+			fi
+			[ "$DRY_RUN" -eq 1 ] && { info "would install pre-commit guard at $hook"; return 0; }
+			mkdir -p "$hooks"
+			cat > "$hook" <<'HOOK'
+#!/bin/sh
+# installed by gitmeright — blocks commits when no identity profile matches.
+if ! command -v gitmeright >/dev/null 2>&1; then
+	exit 0
+fi
+if gitmeright whoami >/dev/null 2>&1; then
+	exit 0
+fi
+printf '\033[31m✗ gitmeright: this repo matches no identity profile.\033[0m\n' >&2
+printf '  run  gitmeright whoami   to see why\n' >&2
+printf '  or   gitmeright add      to create a profile\n' >&2
+printf '  bypass once: git commit --no-verify\n' >&2
+exit 1
+HOOK
+			chmod +x "$hook"
+			ok "guard installed at $hook"
+			;;
+		--remove)
+			if [ -f "$hook" ] && grep -qF "$HOOK_MARKER" "$hook" 2>/dev/null; then
+				[ "$DRY_RUN" -eq 0 ] && rm -f "$hook"
+				ok "guard removed"
+			else
+				info "no gitmeright guard in this repo."
+			fi
+			;;
+		*) die "usage: gitmeright guard [--install|--remove]" ;;
+	esac
+}
 
 usage() {
 	cat <<EOF
@@ -1104,6 +1153,8 @@ ${C_BOLD}commands${C_RESET}
   list                 show every identity
   whoami               which identity does THIS repo use, and why
   doctor [--online]    health check; --online tests ssh against each host
+  guard [--install|--remove]
+                       block commits in repos that match no identity
   tweaks [--install|--remove]
                        optional opinionated git defaults
   regenerate           rebuild generated config from your saved profiles
@@ -1155,6 +1206,7 @@ main() {
 		list|ls)     shift; cmd_list ;;
 		whoami|who)  shift; cmd_whoami ;;
 		doctor)      shift; cmd_doctor "${1:-}" ;;
+		guard)       shift; cmd_guard "${1:-}" ;;
 		tweaks)      shift; cmd_tweaks "${1:-}" ;;
 		regenerate)  shift; cmd_regenerate ;;
 		uninstall)   shift; cmd_uninstall ;;

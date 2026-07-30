@@ -114,6 +114,65 @@ teardown() { teardown_sandbox; }
 
 # --- guard hook --------------------------------------------------------------
 
+@test "guard blocks a commit in a repo matching no profile" {
+	gmr add work --name W --email w@acme.com --host github.com --org acme --no-key
+	repo=$(make_repo outside git@github.com:stranger/x.git)
+	git -C "$repo" config user.name T
+	git -C "$repo" config user.email t@t.com   # so only the hook can block
+
+	bash -c "cd '$repo' && '$GITMERIGHT' guard --install" >/dev/null
+	printf 'x\n' > "$repo/f"; git -C "$repo" add f
+
+	run bash -c "cd '$repo' && PATH='$(dirname "$GITMERIGHT")':\$PATH git commit -m nope"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"matches no identity profile"* ]]
+}
+
+@test "guard allows a commit in a matching repo" {
+	gmr add work --name W --email w@acme.com --host github.com --org acme --no-key
+	repo=$(make_repo inside git@github.com:acme/x.git)
+
+	bash -c "cd '$repo' && '$GITMERIGHT' guard --install" >/dev/null
+	printf 'x\n' > "$repo/f"; git -C "$repo" add f
+
+	run bash -c "cd '$repo' && PATH='$(dirname "$GITMERIGHT")':\$PATH git commit -m yes"
+	[ "$status" -eq 0 ]
+}
+
+@test "guard is bypassable with --no-verify" {
+	gmr add work --name W --email w@acme.com --host github.com --org acme --no-key
+	repo=$(make_repo outside git@github.com:stranger/x.git)
+	git -C "$repo" config user.name T
+	git -C "$repo" config user.email t@t.com
+
+	bash -c "cd '$repo' && '$GITMERIGHT' guard --install" >/dev/null
+	printf 'x\n' > "$repo/f"; git -C "$repo" add f
+
+	run bash -c "cd '$repo' && PATH='$(dirname "$GITMERIGHT")':\$PATH git commit --no-verify -m forced"
+	[ "$status" -eq 0 ]
+}
+
+@test "guard refuses to clobber an existing pre-commit hook" {
+	gmr add work --name W --email w@acme.com --host github.com --org acme --no-key
+	repo=$(make_repo r git@github.com:acme/x.git)
+	mkdir -p "$repo/.git/hooks"
+	printf '#!/bin/sh\necho mine\n' > "$repo/.git/hooks/pre-commit"
+	chmod +x "$repo/.git/hooks/pre-commit"
+
+	run bash -c "cd '$repo' && '$GITMERIGHT' guard --install"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"not overwriting"* ]]
+	grep -q 'echo mine' "$repo/.git/hooks/pre-commit"
+}
+
+@test "guard --remove takes its own hook away" {
+	gmr add work --name W --email w@acme.com --host github.com --org acme --no-key
+	repo=$(make_repo r git@github.com:acme/x.git)
+	bash -c "cd '$repo' && '$GITMERIGHT' guard --install" >/dev/null
+	bash -c "cd '$repo' && '$GITMERIGHT' guard --remove" >/dev/null
+	[ ! -f "$repo/.git/hooks/pre-commit" ]
+}
+
 # --- flags -------------------------------------------------------------------
 
 @test "--help and --version work and exit 0" {
