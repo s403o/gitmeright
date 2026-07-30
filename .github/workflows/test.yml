@@ -50,7 +50,6 @@ jobs:
           npm config set prefix "$HOME/.npm-global"
           npm install -g bats
           echo "$HOME/.npm-global/bin" >> "$GITHUB_PATH"
-
       - name: Record versions
         run: |
           bash --version | head -1
@@ -78,6 +77,7 @@ jobs:
           gitmeright list
           gitmeright add ci --name "CI User" --email ci@example.com \
             --host github.com --org acme --no-key --yes --non-interactive
+          gitmeright doctor
 
       - name: It resolves the identity it promised
         run: |
