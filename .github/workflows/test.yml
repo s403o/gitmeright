@@ -3,8 +3,9 @@ name: test
 on:
   push:
     branches: [main]
+  # No branch filter: stacked PRs target another PR's branch, not main, and a
+  # PR that runs no checks is indistinguishable from one that passed.
   pull_request:
-    branches: [main]
 
 # A test job needs nothing but read access.
 permissions:
