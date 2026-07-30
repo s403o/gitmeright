@@ -41,10 +41,14 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Install bats
-        # Installed from npm rather than apt/brew so every runner gets the same
-        # version. Ubuntu 22.04's apt bats is 1.2.x, which predates flags this
-        # workflow uses — a difference that only shows up on one matrix leg.
-        run: npm install -g bats
+        # From npm rather than apt/brew so every runner gets the same version:
+        # Ubuntu 22.04's apt bats is 1.2.x and predates flags this workflow uses,
+        # a difference that only showed up on one matrix leg. Installed to a user
+        # prefix because the runners' global npm dir is not writable.
+        run: |
+          npm config set prefix "$HOME/.npm-global"
+          npm install -g bats
+          echo "$HOME/.npm-global/bin" >> "$GITHUB_PATH"
 
       - name: Record versions
         run: |
