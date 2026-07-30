@@ -1,0 +1,46 @@
+name: Bug report
+description: Something in gitmeright behaves incorrectly
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: please run `gitmeright doctor` and paste the output below.
+        It answers most of what we'd otherwise have to ask.
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `gitmeright doctor`
+      description: Redact emails or org names if you'd rather not share them — the shape is what matters.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. gitmeright add work --host github.com --org acme
+        2. cd into a repo with remote git@github.com:acme/api.git
+        3. git config user.email  →  returns nothing
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and version
+      placeholder: macOS 15.5 / Ubuntu 24.04 / WSL2
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Output of `gitmeright --version` and `git --version`
+    validations:
+      required: true
