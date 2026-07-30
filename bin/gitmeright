@@ -1,0 +1,924 @@
+#!/usr/bin/env bash
+#
+# gitmeright — use the right git identity for the right project, automatically.
+#
+# https://github.com/s403o/gitmeright
+# MIT licensed. Portable to bash 3.2 (the version macOS ships).
+
+set -euo pipefail
+
+GITMERIGHT_VERSION="2.0.0"
+
+# --- paths -------------------------------------------------------------------
+
+CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+GMR_DIR="$CONFIG_HOME/gitmeright"
+STATE="$GMR_DIR/profiles"          # source of truth, git-config format
+FRAGMENT="$GMR_DIR/gitconfig"      # derived: the includeIf rules
+PROFILE_D="$GMR_DIR/profile.d"     # derived: one [user] block per profile
+TWEAKS="$GMR_DIR/tweaks"           # optional opinionated defaults
+GITCONFIG="$HOME/.gitconfig"
+
+# Minimum git for `hasconfig:remote.*.url` (2.36) and `gitdir:` (2.13).
+GIT_MIN_HASCONFIG=23600
+GIT_MIN_GITDIR=21300
+
+# --- global flags ------------------------------------------------------------
+
+DRY_RUN=0
+ASSUME_YES=0
+INTERACTIVE=1
+QUIET=0
+
+# --- output ------------------------------------------------------------------
+
+is_tty() { [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; }
+
+if is_tty; then
+	C_RESET=$'\033[0m'; C_DIM=$'\033[2m'; C_BOLD=$'\033[1m'
+	C_RED=$'\033[31m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'; C_BLUE=$'\033[34m'
+else
+	C_RESET=''; C_DIM=''; C_BOLD=''; C_RED=''; C_GREEN=''; C_YELLOW=''; C_BLUE=''
+fi
+
+info() { [ "$QUIET" -eq 1 ] || printf '%s\n' "$*"; }
+step() { [ "$QUIET" -eq 1 ] || printf '%s→%s %s\n' "$C_BLUE" "$C_RESET" "$*"; }
+ok()   { [ "$QUIET" -eq 1 ] || printf '%s✓%s %s\n' "$C_GREEN" "$C_RESET" "$*"; }
+warn() { printf '%s!%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
+fail() { printf '%s✗%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; }
+die()  { fail "$*"; exit 1; }
+
+trap 'rc=$?; [ $rc -ne 0 ] && [ $rc -ne 130 ] && fail "aborted at line $LINENO (exit $rc)"; exit $rc' ERR
+
+# --- small helpers -----------------------------------------------------------
+
+# Indirect assignment without eval. printf -v exists since bash 3.1.
+setvar() {
+	local name=$1 value=$2
+	case "$name" in
+		[A-Za-z_]*) ;;
+		*) die "internal: invalid variable name '$name'" ;;
+	esac
+	printf -v "$name" '%s' "$value"
+}
+
+confirm() {
+	local prompt=$1 default=${2:-n} reply
+	[ "$ASSUME_YES" -eq 1 ] && return 0
+	[ "$INTERACTIVE" -eq 0 ] && { [ "$default" = "y" ]; return $?; }
+	if [ "$default" = "y" ]; then prompt="$prompt [Y/n] "; else prompt="$prompt [y/N] "; fi
+	read -r -p "$prompt" reply </dev/tty || reply=""
+	[ -z "$reply" ] && reply=$default
+	case "$reply" in [yY]*) return 0 ;; *) return 1 ;; esac
+}
+
+# Ask until the answer passes $3 (a validator function name). Empty input takes
+# the default when one is offered.
+ask() {
+	local varname=$1 prompt=$2 validator=${3:-validate_nonempty} default=${4:-} reply
+	if [ "$INTERACTIVE" -eq 0 ]; then
+		[ -n "$default" ] || die "non-interactive: no value for $varname"
+		setvar "$varname" "$default"
+		return 0
+	fi
+	while true; do
+		if [ -n "$default" ]; then
+			read -r -p "$prompt [$default]: " reply </dev/tty || reply=""
+			[ -z "$reply" ] && reply=$default
+		else
+			read -r -p "$prompt: " reply </dev/tty || reply=""
+		fi
+		if "$validator" "$reply"; then
+			setvar "$varname" "$reply"
+			return 0
+		fi
+	done
+}
+
+validate_nonempty() {
+	[ -n "$1" ] && return 0
+	fail "cannot be empty."
+	return 1
+}
+
+validate_email() {
+	[ -n "$1" ] || { fail "email cannot be empty."; return 1; }
+	case "$1" in
+		*[!a-zA-Z0-9._%+-]*@*) ;;  # fall through to the regex, which is stricter
+	esac
+	if [[ "$1" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)*\.[a-zA-Z]{2,}$ ]]; then
+		return 0
+	fi
+	fail "'$1' is not a valid email address."
+	return 1
+}
+
+# Labels become filenames, git config subsection names and SSH key names.
+# Dots are excluded so `profile.<label>.<key>` parses unambiguously.
+validate_label() {
+	local l=$1
+	[ -n "$l" ] || { fail "label cannot be empty."; return 1; }
+	if [[ "$l" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]; then
+		return 0
+	fi
+	fail "'$l' is not a valid label — use letters, digits, '-' and '_', starting with a letter or digit."
+	return 1
+}
+
+validate_host() {
+	local h=$1
+	[ -n "$h" ] || { fail "host cannot be empty."; return 1; }
+	if [[ "$h" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z]{2,}$ ]]; then
+		return 0
+	fi
+	fail "'$h' is not a valid hostname (e.g. github.com)."
+	return 1
+}
+
+validate_org() {
+	local o=$1
+	[ -n "$o" ] || { fail "org/username cannot be empty."; return 1; }
+	case "$o" in
+		*[!A-Za-z0-9._/-]*) fail "'$o' contains characters that are not valid in an org or user name."; return 1 ;;
+	esac
+	return 0
+}
+
+validate_optional_dir() { [ -z "$1" ] && return 0; return 0; }
+
+# `gitdir:` is matched against the repository's *resolved* path, so a rule
+# containing a symlink never fires — macOS /tmp -> /private/tmp, or a symlinked
+# home directory. Expand ~ and resolve to the physical path.
+#
+# The directory usually does not exist yet (people set this up before creating
+# ~/work), so resolve the deepest ancestor that does exist and re-attach the
+# rest rather than giving up.
+normalize_dir() {
+	local d=$1 tail='' base
+	[ -z "$d" ] && { printf ''; return 0; }
+
+	if [ "$d" = '~' ]; then
+		d=$HOME
+	elif [ "${d#\~/}" != "$d" ]; then
+		d="$HOME/${d#\~/}"
+	fi
+
+	base=$d
+	while [ ! -d "$base" ] && [ "$base" != '/' ] && [ "$base" != '.' ] && [ -n "$base" ]; do
+		tail="$(basename "$base")/$tail"
+		base=$(dirname "$base")
+	done
+	[ -d "$base" ] && base=$(cd "$base" && pwd -P)
+
+	d=$(printf '%s/%s' "$base" "$tail" | tr -s '/')
+	case "$d" in */) ;; *) d="$d/" ;; esac
+	printf '%s' "$d"
+}
+
+# --- git version -------------------------------------------------------------
+
+# Numeric so 2.10 > 2.9 compares correctly. 2.36.1 -> 23601.
+git_version_num() {
+	local v major minor patch
+	v=$(git --version 2>/dev/null | awk '{print $3}')
+	major=${v%%.*}; v=${v#*.}
+	minor=${v%%.*}; v=${v#*.}
+	patch=${v%%[!0-9]*}
+	[ -n "$major" ] || major=0
+	[ -n "$minor" ] || minor=0
+	[ -n "$patch" ] || patch=0
+	printf '%d' $(( major * 10000 + minor * 100 + patch ))
+}
+
+require_git() {
+	command -v git >/dev/null 2>&1 || die "git is not installed."
+	local n; n=$(git_version_num)
+	if [ "$n" -lt "$GIT_MIN_GITDIR" ]; then
+		die "git $(git --version | awk '{print $3}') is too old. gitmeright needs at least 2.13."
+	fi
+}
+
+supports_hasconfig() { [ "$(git_version_num)" -ge "$GIT_MIN_HASCONFIG" ]; }
+
+# --- state -------------------------------------------------------------------
+
+state_exists() { [ -f "$STATE" ]; }
+
+state_get() {
+	local label=$1 key=$2
+	git config -f "$STATE" --get "profile.$label.$key" 2>/dev/null || printf ''
+}
+
+state_set() {
+	local label=$1 key=$2 value=$3
+	mkdir -p "$(dirname "$STATE")"
+	git config -f "$STATE" "profile.$label.$key" "$value"
+}
+
+# Under --dry-run, redirect the state file to a throwaway copy. Collecting a
+# profile has to record answers somewhere for the summary and the generated
+# preview, and "dry run" must mean nothing on disk changes — including state.
+DRY_TMP=''
+init_dry_run() {
+	[ "$DRY_RUN" -eq 1 ] || return 0
+	DRY_TMP=$(mktemp -d)
+	trap 'rm -rf "$DRY_TMP"' EXIT
+	[ -f "$STATE" ] && cp "$STATE" "$DRY_TMP/profiles"
+	STATE="$DRY_TMP/profiles"
+}
+
+state_labels() {
+	[ -f "$STATE" ] || return 0
+	git config -f "$STATE" --name-only --get-regexp '^profile\..*\.email$' 2>/dev/null \
+		| sed -e 's/^profile\.//' -e 's/\.email$//' || true
+}
+
+state_has() {
+	local label=$1 l
+	for l in $(state_labels); do [ "$l" = "$label" ] && return 0; done
+	return 1
+}
+
+state_remove() {
+	local label=$1
+	git config -f "$STATE" --remove-section "profile.$label" 2>/dev/null || true
+}
+
+state_count() { state_labels | grep -c . || true; }
+
+# --- file writing (dry-run aware) -------------------------------------------
+
+write_file() {
+	local path=$1 content=$2
+	if [ "$DRY_RUN" -eq 1 ]; then
+		printf '%s--- would write %s ---%s\n' "$C_DIM" "$path" "$C_RESET"
+		printf '%s\n' "$content" | sed 's/^/  /'
+		return 0
+	fi
+	mkdir -p "$(dirname "$path")"
+	printf '%s\n' "$content" > "$path"
+}
+
+# --- derived artefacts -------------------------------------------------------
+
+profile_path() { printf '%s/%s' "$PROFILE_D" "$1"; }
+
+default_key_path() { printf '%s/.ssh/id_ed25519_%s' "$HOME" "$1"; }
+
+# One [user]/[core] block per profile.
+#
+# Values are written with `git config -f`, not interpolated into a template:
+# a name like `Ben & Jerry O/Brien "x"` needs git's own quoting rules to survive
+# a round trip, and hand-rolling that escaping is exactly the class of bug this
+# rewrite exists to remove. Nothing here is ever patched in place.
+emit_profile() {
+	local label=$1 name email key path
+	name=$(state_get "$label" name)
+	email=$(state_get "$label" email)
+	key=$(state_get "$label" key)
+	path=$(profile_path "$label")
+
+	if [ "$DRY_RUN" -eq 1 ]; then
+		printf '%s--- would write %s ---%s\n' "$C_DIM" "$path" "$C_RESET"
+		printf '  [user] name = %s / email = %s\n' "$name" "$email"
+		[ -n "$key" ] && printf '  [core] sshCommand = ssh -i %s -o IdentitiesOnly=yes\n' "$key"
+		return 0
+	fi
+
+	mkdir -p "$(dirname "$path")"
+	printf '# Generated by gitmeright. Edit with '"'"'gitmeright add %s'"'"' — changes here are overwritten.\n' "$label" > "$path"
+	git config -f "$path" user.name "$name"
+	git config -f "$path" user.email "$email"
+
+	if [ -n "$key" ]; then
+		# IdentitiesOnly=yes is load-bearing: without it ssh only *adds* the key to
+		# its candidate list, and the server accepts the first key that works — so a
+		# pre-existing default key silently authenticates as the wrong account while
+		# `git config user.email` still reports the right address.
+		git config -f "$path" core.sshCommand "ssh -i $key -o IdentitiesOnly=yes"
+	fi
+}
+
+# The routing rules. Emitted for both SSH and HTTPS remote forms, plus an
+# optional gitdir: rule which works before a remote exists and on git < 2.36.
+emit_fragment() {
+	local body label host org gitdir path
+	body="# Generated by gitmeright $GITMERIGHT_VERSION. Do not edit — regenerate with 'gitmeright regenerate'.
+
+[user]
+	# Without this, a repo matching no profile does not fail — git quietly invents
+	# an identity from your username and hostname and commits with that. This makes
+	# the miss loud, which is the entire point of the tool.
+	useConfigOnly = true"
+
+	for label in $(state_labels); do
+		host=$(state_get "$label" host)
+		org=$(state_get "$label" org)
+		gitdir=$(state_get "$label" gitdir)
+		path=$(profile_path "$label")
+
+		body="$body
+
+# --- $label ---"
+		if [ -n "$host" ] && [ -n "$org" ] && supports_hasconfig; then
+			body="$body
+[includeIf \"hasconfig:remote.*.url:git@$host:$org/**\"]
+	path = $path
+[includeIf \"hasconfig:remote.*.url:ssh://git@$host/$org/**\"]
+	path = $path
+[includeIf \"hasconfig:remote.*.url:https://$host/$org/**\"]
+	path = $path"
+		fi
+		if [ -n "$gitdir" ]; then
+			body="$body
+[includeIf \"gitdir:$gitdir\"]
+	path = $path"
+		fi
+	done
+
+	# Chain the optional tweaks file from here rather than appending to the
+	# fragment after the fact: the fragment is regenerated wholesale, so anything
+	# appended to it separately is lost on the next `regenerate`.
+	if [ -f "$TWEAKS" ]; then
+		body="$body
+
+[include]
+	path = $TWEAKS"
+	fi
+
+	write_file "$FRAGMENT" "$body"
+}
+
+INCLUDE_MARKER="# gitmeright"
+
+# Append exactly one [include] to ~/.gitconfig, after any existing [user]
+# section — git config is last-wins, so an include placed above a global
+# [user] block would be silently overridden by it.
+ensure_include() {
+	if [ -f "$GITCONFIG" ] && grep -qF "$INCLUDE_MARKER" "$GITCONFIG" 2>/dev/null; then
+		return 0
+	fi
+	if [ "$DRY_RUN" -eq 1 ]; then
+		printf '%s--- would append to %s ---%s\n' "$C_DIM" "$GITCONFIG" "$C_RESET"
+		printf '  %s\n  [include]\n  \tpath = %s\n' "$INCLUDE_MARKER" "$FRAGMENT"
+		return 0
+	fi
+	backup_gitconfig
+	{
+		printf '\n%s — identity routing. Remove this block to disable.\n' "$INCLUDE_MARKER"
+		printf '[include]\n\tpath = %s\n' "$FRAGMENT"
+	} >> "$GITCONFIG"
+}
+
+backup_gitconfig() {
+	[ -f "$GITCONFIG" ] || return 0
+	local stamp dest
+	stamp=$(date +%Y%m%dT%H%M%S)
+	dest="$GITCONFIG.gitmeright.bak.$stamp"
+	cp "$GITCONFIG" "$dest"
+	ok "backed up $GITCONFIG → $dest"
+	printf '%s' "$dest" > "$GMR_DIR/.last-backup" 2>/dev/null || true
+}
+
+regenerate() {
+	local label
+	[ "$DRY_RUN" -eq 0 ] && mkdir -p "$PROFILE_D"
+	for label in $(state_labels); do emit_profile "$label"; done
+	emit_fragment
+	ensure_include
+}
+
+# --- ssh keys ----------------------------------------------------------------
+
+ensure_ssh_dir() {
+	[ "$DRY_RUN" -eq 1 ] && return 0
+	mkdir -p "$HOME/.ssh"
+	chmod 700 "$HOME/.ssh"
+}
+
+# Portable exact-permission test. BSD and GNU `find` agree on `-perm <octal>`
+# meaning "exactly these bits", whereas `stat` flags differ between them.
+has_mode() {
+	local path=$1 mode=$2
+	[ -e "$path" ] || return 1
+	[ -n "$(find "$path" -maxdepth 0 -perm "$mode" 2>/dev/null)" ]
+}
+
+# Both halves must exist and agree, otherwise the pair is broken — the state an
+# interrupted run leaves behind, which otherwise reports "already exists" and
+# then silently fails to authenticate.
+key_is_healthy() {
+	local key=$1
+	[ -f "$key" ] || return 1
+	[ -f "$key.pub" ] || return 1
+	ssh-keygen -y -f "$key" >/dev/null 2>&1 || return 1
+	return 0
+}
+
+generate_ssh_key() {
+	local key=$1 email=$2
+
+	if [ -f "$key" ] || [ -f "$key.pub" ]; then
+		if key_is_healthy "$key"; then
+			ok "ssh key exists: $key"
+			return 0
+		fi
+		warn "ssh key at $key is incomplete or unreadable (missing .pub, or bad passphrase)."
+		warn "fix or remove it, then re-run. Not overwriting key material."
+		return 1
+	fi
+
+	if [ "$DRY_RUN" -eq 1 ]; then
+		info "would generate ed25519 key: $key"
+		return 0
+	fi
+
+	ensure_ssh_dir
+	step "generating ed25519 key: $key"
+	if ! ssh-keygen -t ed25519 -C "$email" -f "$key" -N "" -q; then
+		fail "ssh-keygen failed for $key"
+		return 1
+	fi
+	chmod 600 "$key"
+	chmod 644 "$key.pub"
+	ok "created $key (no passphrase)"
+}
+
+show_pubkey() {
+	local label=$1 key host
+	key=$(state_get "$label" key)
+	host=$(state_get "$label" host)
+	[ -f "$key.pub" ] || return 0
+	printf '\n%spublic key for %s%s\n' "$C_BOLD" "$label" "$C_RESET"
+	printf '%s\n' "$(cat "$key.pub")"
+	printf '%sadd it at: %s%s\n' "$C_DIM" "$(provider_key_url "$host")" "$C_RESET"
+}
+
+provider_key_url() {
+	case "$1" in
+		github.com)     printf 'https://github.com/settings/ssh/new' ;;
+		gitlab.com)     printf 'https://gitlab.com/-/user_settings/ssh_keys' ;;
+		bitbucket.org)  printf 'https://bitbucket.org/account/settings/ssh-keys/' ;;
+		*)              printf 'your git host'"'"'s SSH key settings' ;;
+	esac
+}
+
+
+# --- commands ----------------------------------------------------------------
+
+# Values supplied by flags, so `add` is scriptable and testable without a tty.
+OPT_NAME=''; OPT_EMAIL=''; OPT_HOST=''; OPT_ORG=''; OPT_GITDIR=''; OPT_NOKEY=0
+
+parse_profile_opts() {
+	OPT_NAME=''; OPT_EMAIL=''; OPT_HOST=''; OPT_ORG=''; OPT_GITDIR=''; OPT_NOKEY=0
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+			--name)   OPT_NAME=${2:-};   shift 2 ;;
+			--email)  OPT_EMAIL=${2:-};  shift 2 ;;
+			--host)   OPT_HOST=${2:-};   shift 2 ;;
+			--org)    OPT_ORG=${2:-};    shift 2 ;;
+			--gitdir) OPT_GITDIR=${2:-}; shift 2 ;;
+			--no-key) OPT_NOKEY=1;       shift ;;
+			*) die "unknown option: $1" ;;
+		esac
+	done
+}
+
+collect_profile() {
+	local label=$1
+	local name email host org gitdir key wantkey
+
+	[ "$INTERACTIVE" -eq 1 ] && printf '\n%sprofile: %s%s\n' "$C_BOLD" "$label" "$C_RESET"
+
+	local d_name d_email
+	d_name=$(git config --global user.name 2>/dev/null || printf '')
+	d_email=$(git config --global user.email 2>/dev/null || printf '')
+
+	if [ -n "$OPT_NAME" ]; then
+		validate_nonempty "$OPT_NAME" || exit 1; name=$OPT_NAME
+	else
+		ask name "  full name" validate_nonempty "$d_name"
+	fi
+
+	if [ -n "$OPT_EMAIL" ]; then
+		validate_email "$OPT_EMAIL" || exit 1; email=$OPT_EMAIL
+	else
+		ask email "  email" validate_email "$d_email"
+	fi
+
+	if [ -n "$OPT_HOST" ]; then
+		validate_host "$OPT_HOST" || exit 1; host=$OPT_HOST
+	else
+		ask host "  git host" validate_host "github.com"
+	fi
+
+	if [ -n "$OPT_ORG" ]; then
+		validate_org "$OPT_ORG" || exit 1; org=$OPT_ORG
+	else
+		local d_org=''
+		if [ "$host" = "github.com" ] && command -v gh >/dev/null 2>&1; then
+			d_org=$(gh api user --jq .login 2>/dev/null || printf '')
+		fi
+		ask org "  org or username on $host" validate_org "$d_org"
+	fi
+
+	if [ -n "$OPT_GITDIR" ]; then
+		gitdir=$OPT_GITDIR
+	elif [ "$INTERACTIVE" -eq 1 ]; then
+		printf '  %sdirectory rule (optional): a path where every repo uses this profile,%s\n' "$C_DIM" "$C_RESET"
+		printf '  %se.g. ~/work — works before a remote exists. Leave blank to skip.%s\n' "$C_DIM" "$C_RESET"
+		ask gitdir "  directory" validate_optional_dir ""
+	else
+		gitdir=''
+	fi
+
+	key=$(default_key_path "$label")
+	wantkey=1
+	if [ "$OPT_NOKEY" -eq 1 ]; then
+		wantkey=0
+	elif [ "$INTERACTIVE" -eq 1 ]; then
+		confirm "  use a dedicated ssh key ($key)?" y || wantkey=0
+	fi
+
+	state_set "$label" name  "$name"
+	state_set "$label" email "$email"
+	state_set "$label" host  "$host"
+	state_set "$label" org   "$org"
+	[ -n "$gitdir" ] && state_set "$label" gitdir "$(normalize_dir "$gitdir")"
+	if [ "$wantkey" -eq 1 ]; then
+		state_set "$label" key "$key"
+	else
+		git config -f "$STATE" --unset "profile.$label.key" 2>/dev/null || true
+	fi
+}
+
+cmd_init() {
+	require_git
+
+	if state_exists && [ "$(state_count)" -gt 0 ]; then
+		info "gitmeright is already set up with $(state_count) profile(s)."
+		info "use ${C_BOLD}gitmeright add${C_RESET} to add one, or ${C_BOLD}gitmeright list${C_RESET} to see them."
+		confirm "reconfigure from scratch?" n || exit 0
+	fi
+
+	printf '%sgitmeright%s — one identity per project, chosen automatically.\n' "$C_BOLD" "$C_RESET"
+
+	if ! supports_hasconfig; then
+		warn "git $(git --version | awk '{print $3}') is older than 2.36, so remote-URL matching is unavailable."
+		warn "gitmeright will use directory rules (gitdir:) instead — set a directory for each profile."
+	fi
+
+	local count label i
+	if [ "$INTERACTIVE" -eq 1 ]; then
+		while true; do
+			read -r -p "how many identities do you need? [2]: " count </dev/tty || count=""
+			[ -z "$count" ] && count=2
+			case "$count" in ''|*[!0-9]*) fail "enter a number."; continue ;; esac
+			[ "$count" -ge 1 ] && break
+			fail "at least one."
+		done
+	else
+		count=${GITMERIGHT_PROFILE_COUNT:-1}
+	fi
+
+	[ "$DRY_RUN" -eq 0 ] && mkdir -p "$GMR_DIR"
+	i=1
+	while [ "$i" -le "$count" ]; do
+		while true; do
+			ask label "
+label for identity $i (e.g. personal, work)" validate_label ""
+			if state_has "$label"; then
+				fail "'$label' already exists."
+			else
+				break
+			fi
+		done
+		collect_profile "$label"
+		i=$(( i + 1 ))
+	done
+
+	review_and_apply
+}
+
+review_and_apply() {
+	local label
+	printf '\n%ssummary%s\n' "$C_BOLD" "$C_RESET"
+	for label in $(state_labels); do
+		printf '  %-12s %s <%s>  %s/%s%s\n' \
+			"$label" "$(state_get "$label" name)" "$(state_get "$label" email)" \
+			"$(state_get "$label" host)" "$(state_get "$label" org)" \
+			"$([ -n "$(state_get "$label" gitdir)" ] && printf '  dir:%s' "$(state_get "$label" gitdir)")"
+	done
+	printf '\nthis will append one [include] line to %s (backed up first)\n' "$GITCONFIG"
+	printf 'and write config under %s\n\n' "$GMR_DIR"
+
+	if [ "$INTERACTIVE" -eq 1 ] && [ "$ASSUME_YES" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
+		confirm "apply?" y || die "aborted — nothing was changed."
+	fi
+
+	apply_profiles
+}
+
+apply_profiles() {
+	local label failed=0
+	for label in $(state_labels); do
+		local key; key=$(state_get "$label" key)
+		if [ -n "$key" ]; then
+			generate_ssh_key "$key" "$(state_get "$label" email)" || failed=1
+		fi
+	done
+
+	regenerate
+	[ "$DRY_RUN" -eq 1 ] && { info "dry run — nothing was written."; return 0; }
+
+	offer_tweaks
+
+	printf '\n'
+	verify_profiles || failed=1
+
+	for label in $(state_labels); do
+		show_pubkey "$label"
+	done
+
+	printf '\n'
+	if [ "$failed" -eq 0 ]; then
+		ok "done. run ${C_BOLD}gitmeright list${C_RESET} to see your identities."
+	else
+		warn "finished with problems above."
+		return 1
+	fi
+}
+
+# Resolve each profile against a throwaway repo and read the answer back out of
+# git. Never report success from the fact that a write returned 0.
+verify_profiles() {
+	local label rc=0 tmp
+	tmp=$(mktemp -d)
+	for label in $(state_labels); do
+		local host org gitdir expect got url
+		host=$(state_get "$label" host); org=$(state_get "$label" org)
+		gitdir=$(state_get "$label" gitdir); expect=$(state_get "$label" email)
+
+		if [ -n "$host" ] && [ -n "$org" ] && supports_hasconfig; then
+			url="git@$host:$org/verify.git"
+			rm -rf "$tmp/r"; mkdir -p "$tmp/r"
+			git -C "$tmp/r" init -q
+			git -C "$tmp/r" remote add origin "$url"
+			got=$(git -C "$tmp/r" config user.email 2>/dev/null || printf '')
+			if [ "$got" = "$expect" ]; then
+				ok "$(printf '%-12s %s → %s' "$label" "$url" "$expect")"
+			else
+				fail "$(printf '%-12s %s → %s' "$label" "$url" "${got:-no identity}")  expected $expect"
+				rc=1
+			fi
+		elif [ -n "$gitdir" ]; then
+			ok "$(printf '%-12s gitdir:%s → %s' "$label" "$gitdir" "$expect")"
+		else
+			warn "$label has no matching rule — it will never apply."
+			rc=1
+		fi
+	done
+	rm -rf "$tmp"
+	return $rc
+}
+
+cmd_add() {
+	require_git
+	local label=''
+	if [ "$#" -gt 0 ]; then
+		case "$1" in
+			-*) ;;
+			*) label=$1; shift ;;
+		esac
+	fi
+	parse_profile_opts "$@"
+
+	if [ -z "$label" ]; then
+		ask label "label for the new identity" validate_label ""
+	else
+		validate_label "$label" || exit 1
+	fi
+	state_has "$label" && die "'$label' already exists — remove it first, or pick another label."
+	collect_profile "$label"
+	review_and_apply
+}
+
+cmd_remove() {
+	local label=${1:-}
+	[ -n "$label" ] || die "usage: gitmeright remove <label>"
+	state_has "$label" || die "no profile called '$label'. See 'gitmeright list'."
+
+	local key; key=$(state_get "$label" key)
+	state_remove "$label"
+	if [ "$DRY_RUN" -eq 0 ]; then
+		rm -f "$(profile_path "$label")"
+	fi
+	regenerate
+	ok "removed profile '$label'"
+
+	if [ -n "$key" ] && [ -f "$key" ] && [ "$INTERACTIVE" -eq 1 ]; then
+		if confirm "also delete the ssh key $key?" n; then
+			rm -f "$key" "$key.pub"
+			ok "deleted $key"
+		else
+			info "kept $key"
+		fi
+	fi
+}
+
+cmd_list() {
+	if ! state_exists || [ "$(state_count)" -eq 0 ]; then
+		info "no profiles yet — run ${C_BOLD}gitmeright init${C_RESET}."
+		return 0
+	fi
+	printf '%-12s %-26s %-24s %-22s %s\n' LABEL EMAIL MATCHES DIRECTORY KEY
+	local label
+	for label in $(state_labels); do
+		local host org gitdir key keystate
+		host=$(state_get "$label" host); org=$(state_get "$label" org)
+		gitdir=$(state_get "$label" gitdir); key=$(state_get "$label" key)
+		if [ -n "$key" ]; then
+			if key_is_healthy "$key"; then keystate=$(basename "$key"); else keystate="$(basename "$key") (broken)"; fi
+		else
+			keystate='-'
+		fi
+		printf '%-12s %-26s %-24s %-22s %s\n' \
+			"$label" "$(state_get "$label" email)" \
+			"$([ -n "$host" ] && printf '%s/%s' "$host" "$org" || printf '-')" \
+			"${gitdir:--}" "$keystate"
+	done
+}
+
+cmd_regenerate() {
+	require_git
+	state_exists || die "nothing to regenerate — run 'gitmeright init'."
+	regenerate
+	ok "regenerated from $STATE"
+}
+
+cmd_uninstall() {
+	local removed=0
+
+	if [ -f "$GITCONFIG" ] && grep -qF "$INCLUDE_MARKER" "$GITCONFIG" 2>/dev/null; then
+		if [ "$DRY_RUN" -eq 1 ]; then
+			info "would remove the gitmeright [include] block from $GITCONFIG"
+		else
+			local tmp; tmp=$(mktemp)
+			awk -v marker="$INCLUDE_MARKER" '
+				index($0, marker) == 1 { skip = 3; next }
+				skip > 0 { skip--; next }
+				{ print }
+			' "$GITCONFIG" > "$tmp"
+			# drop the blank line the block was preceded by, if it left a trailing gap
+			awk 'BEGIN{blank=0} /^[[:space:]]*$/{blank++; next} {while(blank>0){print ""; blank--}; print} END{}' "$tmp" > "$tmp.2"
+			mv "$tmp.2" "$GITCONFIG"
+			rm -f "$tmp"
+			ok "removed the gitmeright include from $GITCONFIG"
+		fi
+		removed=1
+	fi
+
+	if [ -d "$GMR_DIR" ]; then
+		if confirm "delete $GMR_DIR (profiles and generated config)?" n; then
+			[ "$DRY_RUN" -eq 0 ] && rm -rf "$GMR_DIR"
+			ok "removed $GMR_DIR"
+		else
+			info "kept $GMR_DIR — reinstall with 'gitmeright regenerate'"
+		fi
+		removed=1
+	fi
+
+	local last="$GMR_DIR/.last-backup"
+	if [ -f "$last" ]; then
+		local b; b=$(cat "$last")
+		[ -f "$b" ] && info "your pre-gitmeright config is still at: $b"
+	fi
+
+	[ "$removed" -eq 0 ] && info "gitmeright was not installed."
+	info "ssh keys were left alone."
+}
+
+TWEAKS_MARKER="# gitmeright tweaks"
+
+offer_tweaks() {
+	[ -f "$TWEAKS" ] && return 0
+	[ "$INTERACTIVE" -eq 1 ] || return 0
+	printf '\n%soptional:%s a few git defaults many people like —\n' "$C_BOLD" "$C_RESET"
+	printf '  pull.rebase=true  fetch.prune=true  rebase.autoStash=true\n'
+	printf '  diff.colorMoved=zebra  init.defaultBranch=main  + short aliases\n'
+	confirm "add these? (they change how 'git pull' behaves)" n || return 0
+	cmd_tweaks --install
+}
+
+cmd_tweaks() {
+	case "${1:---install}" in
+		--install)
+			write_file "$TWEAKS" "$TWEAKS_MARKER — remove with 'gitmeright tweaks --remove'
+[pull]
+	# rebase instead of merging, so history stays linear
+	rebase = true
+[fetch]
+	# delete local refs for branches deleted on the remote
+	prune = true
+[rebase]
+	# stash and restore uncommitted work around a rebase
+	autoStash = true
+[diff]
+	# highlight moved lines differently from added/removed ones
+	colorMoved = zebra
+[init]
+	defaultBranch = main
+[alias]
+	co = checkout
+	br = branch
+	st = status
+	lg = log --oneline --graph --all"
+			# emit_fragment chains it in, so this survives regenerate
+			[ "$DRY_RUN" -eq 0 ] && emit_fragment
+			ok "added git tweaks"
+			;;
+		--remove)
+			[ "$DRY_RUN" -eq 0 ] && rm -f "$TWEAKS"
+			regenerate
+			ok "removed git tweaks"
+			;;
+		*) die "usage: gitmeright tweaks [--install|--remove]" ;;
+	esac
+}
+
+
+usage() {
+	cat <<EOF
+${C_BOLD}gitmeright${C_RESET} $GITMERIGHT_VERSION — the right git identity, automatically.
+
+${C_BOLD}usage${C_RESET}
+  gitmeright <command> [options]
+
+${C_BOLD}commands${C_RESET}
+  init                 set up your identities (interactive)
+  add [label]          add one more identity
+  remove <label>       delete an identity
+  list                 show every identity
+  tweaks [--install|--remove]
+                       optional opinionated git defaults
+  regenerate           rebuild generated config from your saved profiles
+  uninstall            remove gitmeright's config (keeps your ssh keys)
+  version              print the version
+
+${C_BOLD}options${C_RESET}
+  --dry-run            show what would change; write nothing
+  --yes                assume yes for confirmations
+  --non-interactive    never prompt; fail if input is missing
+  --quiet              suppress progress output
+  -h, --help           this text
+
+${C_BOLD}files${C_RESET}
+  $STATE
+      your profiles — the source of truth
+  $FRAGMENT
+      generated routing rules, included from ~/.gitconfig
+
+gitmeright appends exactly one [include] line to ~/.gitconfig and backs it
+up first. Everything else you had there is left alone.
+EOF
+}
+
+# --- entry point -------------------------------------------------------------
+
+main() {
+	local args=() a
+	for a in "$@"; do
+		case "$a" in
+			--dry-run)         DRY_RUN=1 ;;
+			--yes|-y)          ASSUME_YES=1 ;;
+			--non-interactive) INTERACTIVE=0 ;;
+			--quiet|-q)        QUIET=1 ;;
+			-h|--help)         usage; exit 0 ;;
+			--version)         printf 'gitmeright %s\n' "$GITMERIGHT_VERSION"; exit 0 ;;
+			-*)                if [ "${#args[@]}" -eq 0 ]; then usage >&2; die "unknown option: $a"; else args+=("$a"); fi ;;
+			*)                 args+=("$a") ;;
+		esac
+	done
+	[ -t 0 ] || INTERACTIVE=0
+	init_dry_run
+
+	set -- ${args[@]+"${args[@]}"}
+	case "${1:-}" in
+		init)        shift; cmd_init "$@" ;;
+		add)         shift; cmd_add "$@" ;;
+		remove|rm)   shift; cmd_remove "${1:-}" ;;
+		list|ls)     shift; cmd_list ;;
+		tweaks)      shift; cmd_tweaks "${1:-}" ;;
+		regenerate)  shift; cmd_regenerate ;;
+		uninstall)   shift; cmd_uninstall ;;
+		version)     printf 'gitmeright %s\n' "$GITMERIGHT_VERSION" ;;
+		''|help)     usage ;;
+		*)           usage >&2; die "unknown command: $1" ;;
+	esac
+}
+
+# Sourcing with GITMERIGHT_LIB=1 loads the functions without running anything,
+# so the test suite can exercise validators and helpers directly rather than
+# re-implementing them — the old CI pasted a *copy* of the email regex into a
+# generated file and tested the copy (audit H-11).
+[ "${GITMERIGHT_LIB:-0}" = "1" ] || main "$@"
