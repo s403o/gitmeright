@@ -464,6 +464,45 @@ provider_key_url() {
 }
 
 
+# Opt-in only, never in --non-interactive: this writes to the user's account.
+offer_key_upload() {
+	local label=$1 key host cli title
+	key=$(state_get "$label" key)
+	host=$(state_get "$label" host)
+	[ -f "$key.pub" ] || return 0
+	[ "$INTERACTIVE" -eq 1 ] || return 0
+	[ "$DRY_RUN" -eq 1 ] && return 0
+
+	case "$host" in
+		github.com)    cli=gh ;;
+		gitlab.com)    cli=glab ;;
+		*)             return 0 ;;
+	esac
+	command -v "$cli" >/dev/null 2>&1 || return 0
+
+	local account=''
+	if [ "$cli" = "gh" ]; then
+		gh auth status >/dev/null 2>&1 || return 0
+		account=$(gh api user --jq .login 2>/dev/null || printf '')
+	else
+		glab auth status >/dev/null 2>&1 || return 0
+	fi
+
+	printf '\n'
+	if [ -n "$account" ]; then
+		info "$cli is authenticated as ${C_BOLD}$account${C_RESET} on $host."
+	fi
+	confirm "upload $(basename "$key").pub to $host via $cli?" n || return 0
+
+	title="gitmeright-$label-$(hostname -s 2>/dev/null || printf 'host')"
+	if [ "$cli" = "gh" ]; then
+		gh ssh-key add "$key.pub" --title "$title" || { warn "upload failed — add it manually at $(provider_key_url "$host")"; return 0; }
+	else
+		glab ssh-key add "$key.pub" --title "$title" || { warn "upload failed — add it manually at $(provider_key_url "$host")"; return 0; }
+	fi
+	ok "uploaded as '$title'"
+}
+
 # --- commands ----------------------------------------------------------------
 
 # Values supplied by flags, so `add` is scriptable and testable without a tty.
@@ -638,6 +677,7 @@ apply_profiles() {
 
 	for label in $(state_labels); do
 		show_pubkey "$label"
+		offer_key_upload "$label"
 	done
 
 	printf '\n'
