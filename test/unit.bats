@@ -33,6 +33,24 @@ teardown() { teardown_sandbox; }
 	[ ! -e "$HOME/SUBST" ]
 }
 
+# Regression for 2.0.0: setvar declared `local name`, so `setvar name ...` wrote
+# to setvar's own local and left the caller's `name` unset. Under `set -u` that
+# killed `gitmeright init` on the very first profile. Every test used --name
+# flags, which bypass ask()/setvar entirely, so nothing caught it.
+@test "setvar assigns targets whose names collide with its own locals" {
+	for tgt in name value var val __x reply prompt default varname check target; do
+		unset "$tgt" 2>/dev/null || true
+		setvar "$tgt" "payload-$tgt"
+		got=$(eval "printf '%s' \"\$$tgt\"")
+		[ "$got" = "payload-$tgt" ] || { echo "setvar $tgt -> '$got'"; return 1; }
+	done
+}
+
+@test "setvar refuses to target its own reserved prefix" {
+	run setvar __gmr_var boom
+	[ "$status" -ne 0 ]
+}
+
 @test "C-04: setvar refuses a variable name that is not an identifier" {
 	run setvar '1bad; touch /tmp/x' value
 	[ "$status" -ne 0 ]

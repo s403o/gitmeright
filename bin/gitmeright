@@ -53,13 +53,19 @@ trap 'rc=$?; [ $rc -ne 0 ] && [ $rc -ne 130 ] && fail "aborted at line $LINENO (
 # --- small helpers -----------------------------------------------------------
 
 # Indirect assignment without eval. printf -v exists since bash 3.1.
+#
+# The locals are prefixed because `printf -v` writes to the nearest variable of
+# that name in scope: if a local here were called `name`, then `setvar name ...`
+# would assign this function's own local and leave the caller's untouched. That
+# shipped in 2.0.0 and broke `init` outright.
 setvar() {
-	local name=$1 value=$2
-	case "$name" in
+	local __gmr_var=$1 __gmr_val=$2
+	case "$__gmr_var" in
+		__gmr_*) die "internal: '$__gmr_var' is reserved" ;;
 		[A-Za-z_]*) ;;
-		*) die "internal: invalid variable name '$name'" ;;
+		*) die "internal: invalid variable name '$__gmr_var'" ;;
 	esac
-	printf -v "$name" '%s' "$value"
+	printf -v "$__gmr_var" '%s' "$__gmr_val"
 }
 
 confirm() {
@@ -74,22 +80,24 @@ confirm() {
 
 # Ask until the answer passes $3 (a validator function name). Empty input takes
 # the default when one is offered.
+# Locals are prefixed for the same reason as in setvar(): an unprefixed local
+# here would shadow the caller's variable when its name happens to match.
 ask() {
-	local varname=$1 prompt=$2 validator=${3:-validate_nonempty} default=${4:-} reply
+	local __gmr_target=$1 __gmr_prompt=$2 __gmr_check=${3:-validate_nonempty} __gmr_default=${4:-} __gmr_reply
 	if [ "$INTERACTIVE" -eq 0 ]; then
-		[ -n "$default" ] || die "non-interactive: no value for $varname"
-		setvar "$varname" "$default"
+		[ -n "$__gmr_default" ] || die "non-interactive: no value for $__gmr_target"
+		setvar "$__gmr_target" "$__gmr_default"
 		return 0
 	fi
 	while true; do
-		if [ -n "$default" ]; then
-			read -r -p "$prompt [$default]: " reply </dev/tty || reply=""
-			[ -z "$reply" ] && reply=$default
+		if [ -n "$__gmr_default" ]; then
+			read -r -p "$__gmr_prompt [$__gmr_default]: " __gmr_reply </dev/tty || __gmr_reply=""
+			[ -z "$__gmr_reply" ] && __gmr_reply=$__gmr_default
 		else
-			read -r -p "$prompt: " reply </dev/tty || reply=""
+			read -r -p "$__gmr_prompt: " __gmr_reply </dev/tty || __gmr_reply=""
 		fi
-		if "$validator" "$reply"; then
-			setvar "$varname" "$reply"
+		if "$__gmr_check" "$__gmr_reply"; then
+			setvar "$__gmr_target" "$__gmr_reply"
 			return 0
 		fi
 	done
